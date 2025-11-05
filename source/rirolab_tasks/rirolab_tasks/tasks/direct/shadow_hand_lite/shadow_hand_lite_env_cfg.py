@@ -299,19 +299,11 @@ class ShadowHandLiteEnvLemonCfg(ShadowHandLiteEnvCfg):
                 # usd_path=f"{LOCAL_ASSETS_DIR}/objects/Props/007_tuna_fish_can.usd",
                 # scale=(0.55, 0.55, 0.55) 
                 # scale=(0.095, 0.095, 0.095) #for peach
-                # scale=(0.08, 0.08, 0.08) #for lemon
-
-                scale=(0.004, 0.004, 0.004) #for teddybear
+                scale=(0.08, 0.08, 0.08) #for lemon
                 # scale=(0.9, 0.9, 0.9) #fishcan
             )
         },
     )
-
-
-
-
-
-    
     # reset
     #rt​= wdist​⋅rdist​​​+(회전) 일치 wrot​⋅rrot​​​+행동 L2 패널티 wact​⋅ract​​​+성공 보너스 breach​⋅1{dt​<success_tolerance 
 
@@ -994,7 +986,7 @@ class ShadowHandLiteEnvTeddybearCfg(ShadowHandLiteEnvCfg):
     )
 
     # set deformable object properties
-    youngs_modulus = 5.0e5   # 500,000 정도. 1e6까지 올려도 됨
+    youngs_modulus = 6.0e5   # 500,000 정도. 1e6까지 올려도 됨
     damping = 0.01           # 출렁임 줄이기 위해 0~0.002 사이
     damping_scale = 0.2      # 전체 damping 효과는 약간만
     poisson_ratio = 0.25     # 0.2~0.3 사이면 자연스럽고 과도한 부피보존은 안 함

@@ -32,7 +32,8 @@ class InHandManipulationDeformEnv(DirectRLEnv):
     def __init__(self, cfg: ShadowHandLiteEnvCfg, render_mode: str | None = None, **kwargs):
         super().__init__(cfg, render_mode, **kwargs)
 
-        ## set deformable object physical parameters here if needed ##
+        ## set deformable object physical parameters here if needed ####################################################################
+
         env_ids = torch.arange(self.num_envs).reshape(-1, 1) # Shape: [num_envs, 1]
         if hasattr(self.cfg, "youngs_modulus"):
             youngs_modulus = torch.full((self.num_envs, ), self.cfg.youngs_modulus) # Shape: [num_envs, 1]
@@ -49,11 +50,13 @@ class InHandManipulationDeformEnv(DirectRLEnv):
         if hasattr(self.cfg, "poisson_ratio"):
             poissons_ratio = torch.full((self.num_envs, ), self.cfg.poisson_ratio) # Shape: [num_envs, 1]
             self.scene.deformable_objects['deformable_object'].material_physx_view.set_poissons_ratio(poissons_ratio, env_ids)
-        ##############################################################
+
+        ################################################################################################################################
 
         self.num_hand_dofs = self.hand.num_joints
 
-        ############################################################################################################
+        ################################################################################################################################
+
         default_world_pos = self.deform_obj.data.default_nodal_state_w[..., :3].clone() # Shape: [B, N, 3]
         default_centroid = torch.mean(default_world_pos, dim=1, keepdim=True) # Shape: [B, 1, 3] #
         self.default_vertices_local = default_world_pos - default_centroid # Shape: [B, N, 3] # SVD를 위한 local 좌표계로 변환(중심점 기준)
@@ -71,7 +74,7 @@ class InHandManipulationDeformEnv(DirectRLEnv):
         self.in_hand_pos = default_centroid.squeeze(1) - self.scene.env_origins[env_ids].squeeze(1)  # <--(B, 3) 형태로 변경 / SVD의 중심점 (goal point comparison 용)
         self.in_hand_pos[:, 2] -= 0.04 # z 약간 아래로 보정, SVD와 비교하는 용으로 goal point 정의
 
-        ############################################################################################################
+        ################################################################################################################################
 
         # buffers for position targets
         self.hand_dof_targets = torch.zeros((self.num_envs, self.num_hand_dofs), dtype=torch.float, device=self.device) #buffer for hand dof targets
@@ -99,10 +102,9 @@ class InHandManipulationDeformEnv(DirectRLEnv):
         # track goal resets
         self.reset_goal_buf = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
 
-
         # default goal positions
         self.goal_rot = torch.zeros((self.num_envs, 4), dtype=torch.float, device=self.device)
-        self.goal_rot[:, 0] = 1.0
+        self.goal_rot[:, 0] = 1.0 #(1,0,0,0) 초기화 --> wxyz
         self.goal_pos = torch.zeros((self.num_envs, 3), dtype=torch.float, device=self.device)
         self.goal_pos[:, :] = torch.tensor([-0.2, -0.45, 0.68], device=self.device)
         
@@ -314,6 +316,8 @@ class InHandManipulationDeformEnv(DirectRLEnv):
         #     + self.cfg.reset_position_noise * pos_noise.unsqueeze(1)  # position noise
         #     + self.scene.env_origins[env_ids].unsqueeze(1)  # global position offset(origin)
         # )
+
+
         object_default_state[..., :3] = (
             object_default_state[..., :3] # (max_sim_vertices_per_body, 3)
             + self.cfg.reset_position_noise * pos_noise.unsqueeze(1)  # position noise (len(env_ids), 3)
@@ -321,6 +325,10 @@ class InHandManipulationDeformEnv(DirectRLEnv):
         ) 
         #속도를 0으로 초기화
         object_default_state[..., 3:] = torch.zeros_like(object_default_state[..., 3:])
+
+
+
+
 
         #rotation noise for Rigid body
         #rot_noise = sample_uniform(-1.0, 1.0, (len(env_ids), 2), device=self.device)  # noise for X and Y rotation
@@ -367,7 +375,7 @@ class InHandManipulationDeformEnv(DirectRLEnv):
         # reset goal rotation
         rand_floats = sample_uniform(-1.0, 1.0, (len(env_ids), 2), device=self.device)
 
-        #marker rotation좌표 고정용
+        # marker rotation 좌표 고정용
         new_rot = randomize_rotation(
             rand_floats[:, 0], rand_floats[:, 1], self.x_unit_tensor[env_ids], self.y_unit_tensor[env_ids]
         )
@@ -376,7 +384,6 @@ class InHandManipulationDeformEnv(DirectRLEnv):
         self.goal_rot[env_ids] = new_rot
         goal_pos = self.goal_pos + self.scene.env_origins
         self.goal_markers.visualize(goal_pos, self.goal_rot)
-
         self.reset_goal_buf[env_ids] = 0
 
     def _compute_intermediate_values(self):
@@ -406,15 +413,9 @@ class InHandManipulationDeformEnv(DirectRLEnv):
         ) # Shape: [B, 3, 3]
         
         # 4. 회전 행렬을 쿼터니언으로 변환 (JIT 함수 호출)
-        q_curr_xyzw = matrix_to_quaternion_xyzw(R_curr) # Shape: [B, 4] (x, y, z, w)
+        q_curr_wxyz = matrix_to_quaternion_wxyz(R_curr) # Shape: [B, 4] (w, x, y, z)
 
-        # --- [수정된 부분] ---
-        # 5. (w, x, y, z) 순서로 변경 (target_rot과 맞추기 위함)
-        # (x, y, z, w) -> (w, x, y, z)
-        q_curr_wxyz = torch.cat((q_curr_xyzw[:, 3:4], q_curr_xyzw[:, 0:3]), dim=-1) 
-        # ---------------------
-
-        # 6. 원본 변수에 SVD 결과 덮어쓰기
+        # 5. 원본 변수에 SVD 결과 덮어쓰기
         self.object_pos = current_centroid.squeeze(1) - self.scene.env_origins
         self.object_rot = q_curr_wxyz  # (w, x, y, z) 순서로 저장
         
@@ -448,7 +449,6 @@ class InHandManipulationDeformEnv(DirectRLEnv):
             ),
             dim=-1,
         )
-
         return obs
 
     def compute_full_observations(self):
@@ -459,13 +459,13 @@ class InHandManipulationDeformEnv(DirectRLEnv):
                 self.cfg.vel_obs_scale * self.hand_dof_vel,
                 # object
                 self.object_pos,
-                self.object_rot,
+                self.object_rot, # (w, x, y, z) 순서
                 self.object_linvel,
                 self.cfg.vel_obs_scale * self.object_angvel,
                 # goal
                 self.in_hand_pos,
                 self.goal_rot,
-                quat_mul(self.object_rot, quat_conjugate(self.goal_rot)),
+                quat_mul(self.object_rot, quat_conjugate(self.goal_rot)), #object_rot (w, x, y, z) 순서
                 # fingertips
                 self.fingertip_pos.view(self.num_envs, self.num_fingertips * 3),
                 self.fingertip_rot.view(self.num_envs, self.num_fingertips * 4),
@@ -485,7 +485,7 @@ class InHandManipulationDeformEnv(DirectRLEnv):
                 self.cfg.vel_obs_scale * self.hand_dof_vel,
                 # object
                 self.object_pos,
-                self.object_rot,
+                self.object_rot, # (w, x, y, z) 순서
                 self.object_linvel,
                 self.cfg.vel_obs_scale * self.object_angvel,
                 # goal
@@ -577,6 +577,7 @@ class InHandManipulationDeformEnv(DirectRLEnv):
         else:
             self.extras["is_success"] = None
 
+
 #######################################################################################3
         # post-step:
         # -- update env counters (used for curriculum generation)
@@ -592,7 +593,6 @@ class InHandManipulationDeformEnv(DirectRLEnv):
             # update observations for recording if needed
             self.obs_buf = self._get_observations() # make sure obs
             self.recorder_manager.record_post_step()
-
 
         # -- reset envs that terminated/timed-out and log the episode information
         reset_env_ids = self.reset_buf.nonzero(as_tuple=False).squeeze(-1)
@@ -693,11 +693,11 @@ def compute_rotation_from_svd(P_src: torch.Tensor, P_tgt: torch.Tensor) -> torch
     return R_no_reflect
 
 @torch.jit.script
-def matrix_to_quaternion_xyzw(matrix: torch.Tensor) -> torch.Tensor:
+def matrix_to_quaternion_wxyz(matrix: torch.Tensor) -> torch.Tensor:
     
     """
-    
-    회전 행렬을 (x, y, z, w) 순서의 쿼터니언으로 변환 (JIT 호환)
+
+    회전 행렬을 (w, x, y, z) 순서의 쿼터니언으로 변환 (JIT 호환)
 
     """
     B = matrix.shape[0]
@@ -741,7 +741,7 @@ def matrix_to_quaternion_xyzw(matrix: torch.Tensor) -> torch.Tensor:
     z_sq = w_sq - 0.5 * (m00 + m11)
     z = torch.sqrt(torch.clamp(z_sq, min=0.0)) * torch.sign(m10 - m01)
 
-    return torch.stack([x, y, z, w], dim=-1)
+    return torch.stack([w, x, y, z], dim=-1)
 
 @torch.jit.script
 def compute_rewards(
@@ -769,16 +769,9 @@ def compute_rewards(
     goal_dist = torch.norm(object_pos - target_pos, p=2, dim=-1)
     rot_dist = rotation_distance(object_rot, target_rot)
 
-    
+
     print(f"rot_dist: {rot_dist*180.0/3.1415926}, object_rot: {object_rot}, target_rot: {target_rot}")
 
-
-    # print("rot_dist:", rot_dist * 180.0 / 3.1415926)
-
-    # if rot_dist < 30.0 * 3.1415926 / 180.0:
-    #     print("Success!!")  
-    # else:
-    #     print("Fail!!")
 
     dist_rew = goal_dist * dist_reward_scale
     rot_rew = 1.0 / (torch.abs(rot_dist) + rot_eps) * rot_reward_scale
