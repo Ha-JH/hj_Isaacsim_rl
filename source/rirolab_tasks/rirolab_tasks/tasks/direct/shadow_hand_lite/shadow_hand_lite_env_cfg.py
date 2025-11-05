@@ -938,8 +938,9 @@ class ShadowHandLiteEnvBulbCfg(ShadowHandLiteEnvCfg):
     vel_obs_scale = 0.2
     # success_tolerance = 0.1 # for dexcube
     # success_tolerance = 0.60 #30 degrees sodp 
-    success_tolerance = 0.35 #20 degrees sodp 
-    # success_tolerance = 0.18 #10 degrees sodp 
+    # success_tolerance = 0.35 #20 degrees sodp 
+
+    success_tolerance = 1.0 #100 degrees sodp 
 
     # max_consecutive_success = 0
     max_consecutive_success = 10
@@ -974,7 +975,7 @@ class ShadowHandLiteEnvTeddybearCfg(ShadowHandLiteEnvCfg):
             mass_props=sim_utils.MassPropertiesCfg(density=500.0),
             scale=(0.003, 0.003, 0.003) #for Teddy Bear
         ),
-        init_state=DeformableObjectCfg.InitialStateCfg(pos=[-0.01, -0.23, 0.55], rot=[1.0, 0.0, 0.0, 0.0]),
+        init_state=DeformableObjectCfg.InitialStateCfg(pos=[-0.01, -0.23, 0.55], rot=[1.0, 0.0, 0.0, 0.0]), #wxyz
     )
 
     decimation = 3
@@ -1032,7 +1033,7 @@ class ShadowHandLiteEnvTeddybearCfg(ShadowHandLiteEnvCfg):
     fall_dist = 0.24
     vel_obs_scale = 0.2
     # success_tolerance = 0.1 # for dexcube
-    success_tolerance = 0.90 #30 degrees sodp 
+    success_tolerance = 0.50 #30 degrees sodp 
     # success_tolerance = 0.35 #20 degrees sodp 
     # success_tolerance = 0.18 #10 degrees sodp 
 

@@ -51,8 +51,6 @@ class InHandManipulationDeformEnv(DirectRLEnv):
             self.scene.deformable_objects['deformable_object'].material_physx_view.set_poissons_ratio(poissons_ratio, env_ids)
         ##############################################################
 
-
-
         self.num_hand_dofs = self.hand.num_joints
 
         ############################################################################################################
@@ -64,7 +62,7 @@ class InHandManipulationDeformEnv(DirectRLEnv):
         # --- SVD 결과를 저장 Tensor 생성 ---
         self.current_object_pos = torch.zeros((self.num_envs, 3), dtype=torch.float, device=self.device) # 현재 물체 위치
         self.current_object_rot = torch.zeros((self.num_envs, 4), dtype=torch.float, device=self.device) # 현재 물체 회전 (쿼터니언)
-        self.current_object_rot[:, 3] = 1.0 # (x,y,z,w) 순서로 w=1 초기화
+        self.current_object_rot[:, 0] = 1.0 # (x,y,z,w) 순서로 w=1 초기화  --> wxyz 로 바꿔줘야함 (1,0,0,0)
 
         # used to compare object position
         # self.in_hand_pos = self.object.data.default_root_state[:, 0:3].clone()
@@ -263,6 +261,7 @@ class InHandManipulationDeformEnv(DirectRLEnv):
 
         if self.cfg.max_consecutive_success > 0:
             # Reset progress (episode length buf) on goal envs if max_consecutive_success > 0
+
             rot_dist = rotation_distance(self.object_rot, self.goal_rot)
             self.episode_length_buf = torch.where(
                 torch.abs(rot_dist) <= self.cfg.success_tolerance,
@@ -308,6 +307,7 @@ class InHandManipulationDeformEnv(DirectRLEnv):
         Shape is (num_instances, max_sim_vertices_per_body, 6).
 
         """
+
         #position noise 적용 + env origin 더해주기
         # object_default_state[..., :3] = (
         #     object_default_state[..., :3] 
@@ -339,7 +339,6 @@ class InHandManipulationDeformEnv(DirectRLEnv):
         """
 
 
-
         # reset hand (그대로 두기)
         delta_max = self.hand_dof_upper_limits[env_ids] - self.hand.data.default_joint_pos[env_ids]
         delta_min = self.hand_dof_lower_limits[env_ids] - self.hand.data.default_joint_pos[env_ids]
@@ -367,9 +366,12 @@ class InHandManipulationDeformEnv(DirectRLEnv):
     def _reset_target_pose(self, env_ids):
         # reset goal rotation
         rand_floats = sample_uniform(-1.0, 1.0, (len(env_ids), 2), device=self.device)
+
+        #marker rotation좌표 고정용
         new_rot = randomize_rotation(
             rand_floats[:, 0], rand_floats[:, 1], self.x_unit_tensor[env_ids], self.y_unit_tensor[env_ids]
         )
+        # new_rot = 
         # update goal pose and markers
         self.goal_rot[env_ids] = new_rot
         goal_pos = self.goal_pos + self.scene.env_origins
@@ -398,7 +400,6 @@ class InHandManipulationDeformEnv(DirectRLEnv):
         current_vertices_local = current_vertices - current_centroid
 
         # 3. SVD로 현재 회전(R_curr) 계산 (JIT 함수 호출)
-        # (기본 자세 -> 현재 자세로의 회전)
         R_curr = compute_rotation_from_svd(
             self.default_vertices_local, 
             current_vertices_local
@@ -407,25 +408,26 @@ class InHandManipulationDeformEnv(DirectRLEnv):
         # 4. 회전 행렬을 쿼터니언으로 변환 (JIT 함수 호출)
         q_curr_xyzw = matrix_to_quaternion_xyzw(R_curr) # Shape: [B, 4] (x, y, z, w)
 
-        # 5. 원본 변수에 SVD 결과 덮어쓰기
+        # --- [수정된 부분] ---
+        # 5. (w, x, y, z) 순서로 변경 (target_rot과 맞추기 위함)
+        # (x, y, z, w) -> (w, x, y, z)
+        q_curr_wxyz = torch.cat((q_curr_xyzw[:, 3:4], q_curr_xyzw[:, 0:3]), dim=-1) 
+        # ---------------------
+
+        # 6. 원본 변수에 SVD 결과 덮어쓰기
         self.object_pos = current_centroid.squeeze(1) - self.scene.env_origins
-        self.object_rot = q_curr_xyzw
+        self.object_rot = q_curr_wxyz  # (w, x, y, z) 순서로 저장
         
         # 속도 정보는 DeformableObject의 root_vel_w를 그대로 사용
-        self.object_velocities = self.deform_obj.data.root_vel_w
+        # ... (속도 계산 부분은 그대로) ...
         current_nodal_vel = self.deform_obj.data.nodal_vel_w  # Shape: [B, N, 3]
         self.object_linvel = torch.mean(current_nodal_vel, dim=1) # Shape: [B, 3]
-
-
         self.object_angvel = torch.zeros_like(self.object_linvel) # Shape: [B, 3]
-
-        # (self.object_velocities는 원본에서도 사용되지 않는 변수이므로 무시해도..., 
-        #  굳이 채우자면 linvel과 angvel을 합쳐줍.)
         self.object_velocities = torch.cat([self.object_linvel, self.object_angvel], dim=-1)
 
 #########################################################################################3
 
-        # data for object
+        # data for Rigid object(참고용) 
         # self.object_pos = self.object.data.root_pos_w - self.scene.env_origins
         # self.object_rot = self.object.data.root_quat_w
         # self.object_velocities = self.object.data.root_vel_w
@@ -570,7 +572,6 @@ class InHandManipulationDeformEnv(DirectRLEnv):
             if self.successes > self.success_counter:
                 self.success_counter += 1
                 self.extras["is_success"] = self.success_counter
-
             else:
                 self.extras["is_success"] = False
         else:
@@ -649,6 +650,7 @@ def randomize_rotation(rand0, rand1, x_unit_tensor, y_unit_tensor):
 def rotation_distance(object_rot, target_rot):
     # Orientation alignment for the cube in hand and goal cube
     quat_diff = quat_mul(object_rot, quat_conjugate(target_rot))
+
     return 2.0 * torch.asin(torch.clamp(torch.norm(quat_diff[:, 1:4], p=2, dim=-1), max=1.0))  # changed quat convention
 
 
@@ -692,33 +694,34 @@ def compute_rotation_from_svd(P_src: torch.Tensor, P_tgt: torch.Tensor) -> torch
 
 @torch.jit.script
 def matrix_to_quaternion_xyzw(matrix: torch.Tensor) -> torch.Tensor:
+    
     """
+    
     회전 행렬을 (x, y, z, w) 순서의 쿼터니언으로 변환 (JIT 호환)
-    (Pytorch3D의 matrix_to_quaternion 대체)
+
     """
     B = matrix.shape[0]
-    q = torch.empty((B, 4), dtype=matrix.dtype, device=matrix.device)
+    # q = torch.empty((B, 4), dtype=matrix.dtype, device=matrix.device)
 
     M = matrix.reshape(B, 3, 3)
     trace = M[:, 0, 0] + M[:, 1, 1] + M[:, 2, 2]
 
-    # w 계산
-    q[:, 3] = 0.5 * torch.sqrt(torch.clamp(1.0 + trace, min=0.0))
+    # # w 계산
+    # q[:, 3] = 0.5 * torch.sqrt(torch.clamp(1.0 + trace, min=0.0))
 
-    # x 계산
-    q[:, 0] = 0.5 * torch.sqrt(torch.clamp(1.0 + M[:, 0, 0] - M[:, 1, 1] - M[:, 2, 2], min=0.0))
-    q[:, 0] = q[:, 0] * torch.sign(M[:, 2, 1] - M[:, 1, 2])
+    # # x 계산
+    # q[:, 0] = 0.5 * torch.sqrt(torch.clamp(1.0 + M[:, 0, 0] - M[:, 1, 1] - M[:, 2, 2], min=0.0))
+    # q[:, 0] = q[:, 0] * torch.sign(M[:, 2, 1] - M[:, 1, 2])
 
-    # y 계산
-    q[:, 1] = 0.5 * torch.sqrt(torch.clamp(1.0 - M[:, 0, 0] + M[:, 1, 1] - M[:, 2, 2], min=0.0))
-    q[:, 1] = q[:, 1] * torch.sign(M[:, 0, 2] - M[:, 2, 0])
+    # # y 계산
+    # q[:, 1] = 0.5 * torch.sqrt(torch.clamp(1.0 - M[:, 0, 0] + M[:, 1, 1] - M[:, 2, 2], min=0.0))
+    # q[:, 1] = q[:, 1] * torch.sign(M[:, 0, 2] - M[:, 2, 0])
 
-    # z 계산
-    q[:, 2] = 0.5 * torch.sqrt(torch.clamp(1.0 - M[:, 0, 0] - M[:, 1, 1] + M[:, 2, 2], min=0.0))
-    q[:, 2] = q[:, 2] * torch.sign(M[:, 1, 0] - M[:, 0, 1])
+    # # z 계산
+    # q[:, 2] = 0.5 * torch.sqrt(torch.clamp(1.0 - M[:, 0, 0] - M[:, 1, 1] + M[:, 2, 2], min=0.0))
+    # q[:, 2] = q[:, 2] * torch.sign(M[:, 1, 0] - M[:, 0, 1])
 
     # 수치적 안정성을 위해 가장 큰 성분을 먼저 계산하는 것이 좋으나,
-    # 이 구현이 더 간단하고 JIT에서 잘 작동합니다.
     # (w, x, y, z) -> (x, y, z, w) 순서 확인
     
     # 더 안정적인 TF3D/Pytorch3D 방식 (JIT 호환)
@@ -765,6 +768,11 @@ def compute_rewards(
    
     goal_dist = torch.norm(object_pos - target_pos, p=2, dim=-1)
     rot_dist = rotation_distance(object_rot, target_rot)
+
+    
+    print(f"rot_dist: {rot_dist*180.0/3.1415926}, object_rot: {object_rot}, target_rot: {target_rot}")
+
+
     # print("rot_dist:", rot_dist * 180.0 / 3.1415926)
 
     # if rot_dist < 30.0 * 3.1415926 / 180.0:
