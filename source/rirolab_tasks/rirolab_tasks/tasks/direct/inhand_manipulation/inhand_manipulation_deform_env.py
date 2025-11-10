@@ -714,6 +714,7 @@ def compute_rotation_from_svd(P_src: torch.Tensor, P_tgt: torch.Tensor, prev_V_T
     # 부호를 뒤집어야 하는(-1) env에 대해 U와 V_T의 부호를 모두 변경
     flip_tensor = flip_sign.unsqueeze(-1).unsqueeze(-1) # Shape: [B, 1, 1]
     V_T = V_T * flip_tensor
+    U = U * flip_tensor
 
 ################################3
     # 최적의 회전 행렬 R = V * U_T
