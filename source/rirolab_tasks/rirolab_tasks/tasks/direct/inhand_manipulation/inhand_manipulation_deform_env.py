@@ -67,6 +67,9 @@ class InHandManipulationDeformEnv(DirectRLEnv):
         init_rot_wxyz = self.cfg.deformable_object_cfg.init_state.rot
         self.init_object_rot = torch.tensor(init_rot_wxyz, dtype=torch.float, device=self.device).repeat(self.num_envs, 1)
 
+        # --- [수정] SVD 축 뒤집힘 방지를 위한 이전 V_T 저장 버퍼 ---
+        self.prev_V_T = torch.eye(3, device=self.device).unsqueeze(0).repeat(self.num_envs, 1, 1) # Shape: [B, 3, 3]
+
 
         self.in_hand_pos = default_centroid.squeeze(1) - self.scene.env_origins[env_ids].squeeze(1)  # <--(B, 3) 형태로 변경 / SVD의 중심점 (goal point comparison 용)
         self.in_hand_pos[:, 2] -= 0.04 # z 약간 아래로 보정, SVD와 비교하는 용으로 goal point 정의
@@ -373,6 +376,12 @@ class InHandManipulationDeformEnv(DirectRLEnv):
         self.hand.write_joint_state_to_sim(dof_pos, dof_vel, env_ids=env_ids)
 
         self.successes[env_ids] = 0
+
+        # --- [수정] SVD '메모리' 리셋 ---
+        # 리셋되는 환경(env_ids)에 한해 prev_V_T 버퍼를 항등 행렬(기본값)로 초기화합니다.
+        self.prev_V_T[env_ids] = torch.eye(3, device=self.device)
+
+
         self._compute_intermediate_values()
 
         if self.recorder_manager is not None:
@@ -415,12 +424,22 @@ class InHandManipulationDeformEnv(DirectRLEnv):
         current_centroid = torch.mean(current_vertices, dim=1, keepdim=True)
         current_vertices_local = current_vertices - current_centroid
 
-        # 3. SVD로 현재 회전(R_curr) 계산 (JIT 함수 호출)
-        R_curr = compute_rotation_from_svd(
-            self.default_vertices_local, 
-            current_vertices_local
-        ) # Shape: [B, 3, 3]
+        # # 3. SVD로 현재 회전(R_curr) 계산 (JIT 함수 호출)
+        # R_curr = compute_rotation_from_svd(
+        #     self.default_vertices_local, 
+        #     current_vertices_local
+        # ) # Shape: [B, 3, 3]
         
+        # 3. SVD로 현재 회전(R_curr) 계산 (JIT 함수 호출)
+        R_curr, new_V_T = compute_rotation_from_svd( # [수정] 2개의 값을 반환받음
+            self.default_vertices_local, 
+            current_vertices_local,
+            self.prev_V_T # [수정] 이전 V_T 값을 인자로 전달
+        ) # Shape: [B, 3, 3]
+        # 3.5. [수정] 다음 스텝을 위해 V_T 상태 저장 (detach로 그래프 분리)
+        self.prev_V_T = new_V_T.detach()
+
+
         # 4. 회전 행렬을 쿼터니언으로 변환 (JIT 함수 호출)
         q_curr_relative_wxyz = matrix_to_quaternion_wxyz(R_curr) # Shape: [B, 4] (w, x, y, z)
 
@@ -665,7 +684,7 @@ def rotation_distance(object_rot, target_rot):
 
 
 @torch.jit.script
-def compute_rotation_from_svd(P_src: torch.Tensor, P_tgt: torch.Tensor) -> torch.Tensor:
+def compute_rotation_from_svd(P_src: torch.Tensor, P_tgt: torch.Tensor, prev_V_T: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
     """
     SVD(Kabsch 알고리즘)를 사용하여 P_src를 P_tgt에 정렬하는
     최적의 회전 행렬 R을 계산 (JIT 호환)
@@ -678,18 +697,29 @@ def compute_rotation_from_svd(P_src: torch.Tensor, P_tgt: torch.Tensor) -> torch
         회전 행렬 R (Shape: [B, 3, 3])
     """
     
-    # 1. 공분산 행렬 H = P_src_T * P_tgt
+    # 공분산 행렬 H = P_src_T * P_tgt
     H = torch.bmm(P_src.transpose(1, 2), P_tgt) # Shape: [B, 3, 3]
 
-    # 2. SVD 수행: H = U * S * V_T
+    # SVD 수행: H = U * S * V_T
     # torch.linalg.svd는 V가 아닌 V_T를 반환합니다.
     U, S, V_T = torch.linalg.svd(H) # V_T Shape: [B, 3, 3]
 
-    # 3. 최적의 회전 행렬 R = V * U_T
+    # 3. [추가됨] 축 연속성 보장 (Temporal Coherence Check)
+    #    새 V_T의 첫 행(첫 번째 주축)과 이전 V_T의 첫 행의 부호가 같은지 확인
+    #    (내적을 사용해 부호가 반대인(-1) 환경을 찾음)
+    dot_product = torch.sum(V_T[:, 0, :] * prev_V_T[:, 0, :], dim=1) # Shape: [B]
+    flip_sign = torch.sign(dot_product) # Shape: [B]
+    flip_sign[flip_sign == 0] = 1.0 # 0 방지
+    
+    # 부호를 뒤집어야 하는(-1) env에 대해 U와 V_T의 부호를 모두 변경
+    flip_tensor = flip_sign.unsqueeze(-1).unsqueeze(-1) # Shape: [B, 1, 1]
+    V_T = V_T * flip_tensor
+
+################################3
+    # 최적의 회전 행렬 R = V * U_T
     # V = V_T.transpose(1, 2)
     R = torch.bmm(V_T.transpose(1, 2), U.transpose(1, 2)) # Shape: [B, 3, 3]
 
-    # 4. [중요] 반사(Reflection) 보정
     # R의 행렬식(determinant)이 -1이 되는 경우 (반전된 경우)를 방지
     det_R = torch.linalg.det(R) # Shape: [B]
     
@@ -697,10 +727,12 @@ def compute_rotation_from_svd(P_src: torch.Tensor, P_tgt: torch.Tensor) -> torch
     V_T_new = V_T.clone()
     V_T_new[:, -1, :] *= torch.sign(det_R).unsqueeze(-1)
     
+################################3
+
     # 보정된 최적 회전 행렬
     R_no_reflect = torch.bmm(V_T_new.transpose(1, 2), U.transpose(1, 2))
 
-    return R_no_reflect
+    return R_no_reflect, V_T_new  
 
 @torch.jit.script
 def matrix_to_quaternion_wxyz(matrix: torch.Tensor) -> torch.Tensor:
@@ -715,26 +747,8 @@ def matrix_to_quaternion_wxyz(matrix: torch.Tensor) -> torch.Tensor:
 
     M = matrix.reshape(B, 3, 3)
     trace = M[:, 0, 0] + M[:, 1, 1] + M[:, 2, 2]
-
-    # # w 계산
-    # q[:, 3] = 0.5 * torch.sqrt(torch.clamp(1.0 + trace, min=0.0))
-
-    # # x 계산
-    # q[:, 0] = 0.5 * torch.sqrt(torch.clamp(1.0 + M[:, 0, 0] - M[:, 1, 1] - M[:, 2, 2], min=0.0))
-    # q[:, 0] = q[:, 0] * torch.sign(M[:, 2, 1] - M[:, 1, 2])
-
-    # # y 계산
-    # q[:, 1] = 0.5 * torch.sqrt(torch.clamp(1.0 - M[:, 0, 0] + M[:, 1, 1] - M[:, 2, 2], min=0.0))
-    # q[:, 1] = q[:, 1] * torch.sign(M[:, 0, 2] - M[:, 2, 0])
-
-    # # z 계산
-    # q[:, 2] = 0.5 * torch.sqrt(torch.clamp(1.0 - M[:, 0, 0] - M[:, 1, 1] + M[:, 2, 2], min=0.0))
-    # q[:, 2] = q[:, 2] * torch.sign(M[:, 1, 0] - M[:, 0, 1])
-
-    # 수치적 안정성을 위해 가장 큰 성분을 먼저 계산하는 것이 좋으나,
-    # (w, x, y, z) -> (x, y, z, w) 순서 확인
     
-    # 더 안정적인 TF3D/Pytorch3D 방식 (JIT 호환)
+    # TF3D/Pytorch3D (JIT 호환)
     m00, m01, m02 = M[:, 0, 0], M[:, 0, 1], M[:, 0, 2]
     m10, m11, m12 = M[:, 1, 0], M[:, 1, 1], M[:, 1, 2]
     m20, m21, m22 = M[:, 2, 0], M[:, 2, 1], M[:, 2, 2]
@@ -779,10 +793,10 @@ def compute_rewards(
     goal_dist = torch.norm(object_pos - target_pos, p=2, dim=-1)
     rot_dist = rotation_distance(object_rot, target_rot)
 
-
+    is_exploded = torch.isnan(goal_dist) | torch.isnan(rot_dist)
     # print(f"rot_dist: {rot_dist*180.0/3.1415926}, object_rot: {object_rot}, target_rot: {target_rot}")
 
-    # print(f"object_rot: {object_rot}")
+    print(f"object_rot: {object_rot}")
 
 
     dist_rew = goal_dist * dist_reward_scale
@@ -792,11 +806,21 @@ def compute_rewards(
 
     # Total reward is: position distance + orientation alignment + action regularization + success bonus + fall penalty
     reward = dist_rew + rot_rew + action_penalty * action_penalty_scale
-    
+
+    # --- [수정 2] 폭발하지 않았을 때만 보너스와 페널티를 계산 ---
     # Find out which envs hit the goal and update successes count
-    goal_resets = torch.where(torch.abs(rot_dist) <= success_tolerance, torch.ones_like(reset_goal_buf), reset_goal_buf)
+    goal_reached = (torch.abs(rot_dist) <= success_tolerance) & ~is_exploded
+    goal_resets = torch.where(goal_reached, torch.ones_like(reset_goal_buf), reset_goal_buf)
     successes = successes + goal_resets
+
+    # # Find out which envs hit the goal and update successes count
+    # goal_resets = torch.where(torch.abs(rot_dist) <= success_tolerance, torch.ones_like(reset_goal_buf), reset_goal_buf)
+    # successes = successes + goal_resets
     
+
+
+
+
     # Success bonus: orientation is within `success_tolerance` of goal orientation
     reward = torch.where(goal_resets == 1, reward + reach_goal_bonus, reward)
 
@@ -805,6 +829,16 @@ def compute_rewards(
 
     # Check env termination conditions, including maximum success number
     resets = torch.where(goal_dist >= fall_dist, torch.ones_like(reset_buf), reset_buf)
+
+    # --- [수정 3: 가장 중요] 폭발했다면, 모든 보상을 무시하고 fall_penalty 값으로 덮어씁니다. ---
+    # 이것이 NaN 리워드를 막는 핵심 코드입니다.
+    reward = torch.where(is_exploded, torch.full_like(reward, fall_penalty), reward)
+
+    # --- [수정 4] 폭발도 리셋으로 간주하여 cons_successes 계산에 반영 ---
+    resets = torch.where(goal_dist >= fall_dist, torch.ones_like(reset_buf), reset_buf)
+    resets = resets | is_exploded # 폭발도 리셋에 포함
+
+
 
     num_resets = torch.sum(resets)
     finished_cons_successes = torch.sum(successes * resets.float())

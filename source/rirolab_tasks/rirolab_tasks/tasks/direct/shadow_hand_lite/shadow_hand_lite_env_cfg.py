@@ -152,13 +152,13 @@ class ShadowHandLiteEnvCfg(DirectRLEnvCfg):
     # robot
     robot_cfg: ArticulationCfg = SHADOW_HAND_LITE_CFG.replace(prim_path="/World/envs/env_.*/Robot").replace(
         init_state=ArticulationCfg.InitialStateCfg(
-            # pos=(0.0, 0.0, 0.5),
-            # rot=(1.0, 0.0, 0.0, 0.0),
-            # joint_pos={".*": 0.0},
-
-            pos=(0.0, 0.0, -1000.0),
+            pos=(0.0, 0.0, 0.5),
             rot=(1.0, 0.0, 0.0, 0.0),
             joint_pos={".*": 0.0},
+
+            # pos=(0.0, 0.0, -1000.0),
+            # rot=(1.0, 0.0, 0.0, 0.0),
+            # joint_pos={".*": 0.0},
         )
     )
     actuated_joint_names = [
@@ -974,7 +974,7 @@ class ShadowHandLiteEnvTeddybearCfg(ShadowHandLiteEnvCfg):
                 settling_threshold=0.05,
                 sleep_damping=10.0,
                 self_collision=True,
-                simulation_hexahedral_resolution=7,
+                simulation_hexahedral_resolution=5,
                 collision_simplification=True,
                 sleep_threshold=0.005,
                 max_depenetration_velocity=100.0,
@@ -982,12 +982,12 @@ class ShadowHandLiteEnvTeddybearCfg(ShadowHandLiteEnvCfg):
             mass_props=sim_utils.MassPropertiesCfg(density=500.0),
             scale=(0.0027, 0.0027, 0.0027) #for Teddy Bear
         ),
-        # init_state=DeformableObjectCfg.InitialStateCfg(pos=[-0.01, -0.23, 0.55], rot=[1.0, 0.0, 0.0, 0.0]), #wxyz
+        init_state=DeformableObjectCfg.InitialStateCfg(pos=[-0.01, -0.23, 0.55], rot=[1.0, 0.0, 0.0, 0.0]), #wxyz
 
-        init_state=DeformableObjectCfg.InitialStateCfg(pos=[-0.01, -0.23, 0.05], rot=(0.0, 0.0, 0.0, 1.0)), #wxyz for test
+        # init_state=DeformableObjectCfg.InitialStateCfg(pos=[-0.01, -0.23, 0.05], rot=(0.0, 0.0, 0.0, 1.0)), #wxyz for test
     )
 
-    decimation = 20
+    decimation = 5
     sim: SimulationCfg = SimulationCfg(
         dt=1 / 120,
         render_interval=decimation,
@@ -1007,8 +1007,8 @@ class ShadowHandLiteEnvTeddybearCfg(ShadowHandLiteEnvCfg):
     )
 
     # set deformable object properties
-    youngs_modulus = 0.9e5   # 500,000 정도. 1e6까지 올려도 됨
-    damping = 0.002          # 출렁임 줄이기 위해 0~0.002 사이
+    youngs_modulus = 0.5e5   # 500,000 정도. 1e6까지 올려도 됨
+    damping = 0.01          # 출렁임 줄이기 위해 0~0.002 사이
     damping_scale = 0.2      # 전체 damping 효과는 약간만
     poisson_ratio = 0.25     # 0.2~0.3 사이면 자연스럽고 과도한 부피보존은 안 함
     dynamic_friction = 0.5   # 이건 그대로 둬도 됨
@@ -1034,21 +1034,21 @@ class ShadowHandLiteEnvTeddybearCfg(ShadowHandLiteEnvCfg):
     #rt​= wdist​⋅rdist​​​+(회전) 일치 wrot​⋅rrot​​​+행동 L2 패널티 wact​⋅ract​​​+성공 보너스 breach​⋅1{dt​<success_tolerance 
     # reset_position_noise = 0.01  # range of position at reset
     #손바닥에 갇혀있는경우 
-    reset_position_noise = 0.0001
-    reset_dof_pos_noise = 0.2  # range of dof pos at reset
+    reset_position_noise = 0.0000
+    reset_dof_pos_noise = 0.1 # range of dof pos at reset
     reset_dof_vel_noise = 0.0  # range of dof vel at reset
 
     # reward scales
     dist_reward_scale = -3   #-10.0 -> -5.0 # distance from palm to object
-    rot_reward_scale = 10.0  #1.0 -> 5
+    rot_reward_scale = 15.0 #1.0 -> 5
     rot_eps = 0.2 #0.1 -> 0.3
 
     action_penalty_scale = -0.00007 #*0.0002->0.0003 #more movement?
 
-    reach_goal_bonus = 200
-    fall_penalty = -10 
-    # fall_dist = 0.24
-    fall_dist = 100
+    reach_goal_bonus = 250
+    fall_penalty = -20
+    fall_dist = 0.24
+    # fall_dist = 100
     vel_obs_scale = 0.2
     # success_tolerance = 0.1 # for dexcube
     success_tolerance = 0.5 #30 degrees sodp 
@@ -1079,7 +1079,6 @@ class ShadowHandLiteOpenAIEnvCfg(ShadowHandLiteEnvCfg):
             static_friction=1.0,
             dynamic_friction=1.0,
         ),
-
 
         physx=PhysxCfg(
             bounce_threshold_velocity=0.2,
