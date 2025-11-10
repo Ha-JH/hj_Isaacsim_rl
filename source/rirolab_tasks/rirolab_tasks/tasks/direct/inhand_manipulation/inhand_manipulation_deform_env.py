@@ -683,57 +683,86 @@ def rotation_distance(object_rot, target_rot):
     return 2.0 * torch.asin(torch.clamp(torch.norm(quat_diff[:, 1:4], p=2, dim=-1), max=1.0))  # changed quat convention
 
 
+# @torch.jit.script
+# def compute_rotation_from_svd(P_src: torch.Tensor, P_tgt: torch.Tensor, prev_V_T: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+#     """
+#     SVD(Kabsch 알고리즘)를 사용하여 P_src를 P_tgt에 정렬하는
+#     최적의 회전 행렬 R을 계산 (JIT 호환)
+
+#     Args:
+#         P_src: 소스 점 구름 (중심점이 0이어야 함) (Shape: [B, N, 3])
+#         P_tgt: 타겟 점 구름 (중심점이 0이어야 함) (Shape: [B, N, 3])
+
+#     Returns:
+#         회전 행렬 R (Shape: [B, 3, 3])
+#     """
+    
+#     # 공분산 행렬 H = P_src_T * P_tgt
+#     H = torch.bmm(P_src.transpose(1, 2), P_tgt) # Shape: [B, 3, 3]
+
+#     # SVD 수행: H = U * S * V_T
+#     # torch.linalg.svd는 V가 아닌 V_T를 반환합니다.
+#     U, S, V_T = torch.linalg.svd(H) # V_T Shape: [B, 3, 3]
+
+#     # 3. [추가됨] 축 연속성 보장 (Temporal Coherence Check)
+#     #    새 V_T의 첫 행(첫 번째 주축)과 이전 V_T의 첫 행의 부호가 같은지 확인
+#     #    (내적을 사용해 부호가 반대인(-1) 환경을 찾음)
+#     dot_product = torch.sum(V_T[:, 0, :] * prev_V_T[:, 0, :], dim=1) # Shape: [B]
+#     flip_sign = torch.sign(dot_product) # Shape: [B]
+#     flip_sign[flip_sign == 0] = 1.0 # 0 방지
+    
+#     # 부호를 뒤집어야 하는(-1) env에 대해 U와 V_T의 부호를 모두 변경
+#     flip_tensor = flip_sign.unsqueeze(-1).unsqueeze(-1) # Shape: [B, 1, 1]
+#     V_T = V_T * flip_tensor
+#     # U = U * flip_tensor
+
+# ################################3
+#     # 최적의 회전 행렬 R = V * U_T
+#     # V = V_T.transpose(1, 2)
+#     R = torch.bmm(V_T.transpose(1, 2), U.transpose(1, 2)) # Shape: [B, 3, 3]
+
+#     # R의 행렬식(determinant)이 -1이 되는 경우 (반전된 경우)를 방지
+#     det_R = torch.linalg.det(R) # Shape: [B]
+    
+#     # det_R < 0 인 envs에 대해 V_T의 마지막 행의 부호를 뒤집음
+#     V_T_new = V_T.clone()
+#     V_T_new[:, -1, :] *= torch.sign(det_R).unsqueeze(-1)
+    
+# ################################3
+
+#     # 보정된 최적 회전 행렬
+#     R_no_reflect = torch.bmm(V_T_new.transpose(1, 2), U.transpose(1, 2))
+
+#     return R_no_reflect, V_T_new  
+
 @torch.jit.script
-def compute_rotation_from_svd(P_src: torch.Tensor, P_tgt: torch.Tensor, prev_V_T: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
-    """
-    SVD(Kabsch 알고리즘)를 사용하여 P_src를 P_tgt에 정렬하는
-    최적의 회전 행렬 R을 계산 (JIT 호환)
+def compute_rotation_from_svd(
+        P_src: torch.Tensor,
+        P_tgt: torch.Tensor,
+        prev_V_T: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        H = torch.bmm(P_src.transpose(1, 2), P_tgt)
+        U, S, V_T = torch.linalg.svd(H)  # [B,3,3]
 
-    Args:
-        P_src: 소스 점 구름 (중심점이 0이어야 함) (Shape: [B, N, 3])
-        P_tgt: 타겟 점 구름 (중심점이 0이어야 함) (Shape: [B, N, 3])
+        # 1) temporal coherence on V_T
+        dot0 = torch.sum(V_T[:, 0, :] * prev_V_T[:, 0, :], dim=1)  # [B]
+        # 너무 작으면 그냥 같은 거라고 치자
+        dot0 = torch.where(torch.abs(dot0) < 1e-3, torch.ones_like(dot0), dot0)
+        flip = torch.sign(dot0).unsqueeze(-1).unsqueeze(-1)        # [B,1,1]
+        V_T = V_T * flip
 
-    Returns:
-        회전 행렬 R (Shape: [B, 3, 3])
-    """
-    
-    # 공분산 행렬 H = P_src_T * P_tgt
-    H = torch.bmm(P_src.transpose(1, 2), P_tgt) # Shape: [B, 3, 3]
+        # 2) build R
+        R = torch.bmm(V_T.transpose(1, 2), U.transpose(1, 2))      # [B,3,3]
 
-    # SVD 수행: H = U * S * V_T
-    # torch.linalg.svd는 V가 아닌 V_T를 반환합니다.
-    U, S, V_T = torch.linalg.svd(H) # V_T Shape: [B, 3, 3]
+        # 3) reflection fix
+        det_R = torch.linalg.det(R)                                # [B]
+        V_T_fixed = V_T.clone()
+        neg_mask = det_R < 0.0
+        V_T_fixed[neg_mask, -1, :] *= -1.0
 
-    # 3. [추가됨] 축 연속성 보장 (Temporal Coherence Check)
-    #    새 V_T의 첫 행(첫 번째 주축)과 이전 V_T의 첫 행의 부호가 같은지 확인
-    #    (내적을 사용해 부호가 반대인(-1) 환경을 찾음)
-    dot_product = torch.sum(V_T[:, 0, :] * prev_V_T[:, 0, :], dim=1) # Shape: [B]
-    flip_sign = torch.sign(dot_product) # Shape: [B]
-    flip_sign[flip_sign == 0] = 1.0 # 0 방지
-    
-    # 부호를 뒤집어야 하는(-1) env에 대해 U와 V_T의 부호를 모두 변경
-    flip_tensor = flip_sign.unsqueeze(-1).unsqueeze(-1) # Shape: [B, 1, 1]
-    V_T = V_T * flip_tensor
-    U = U * flip_tensor
+        R_fixed = torch.bmm(V_T_fixed.transpose(1, 2), U.transpose(1, 2))
+        return R_fixed, V_T_fixed
 
-################################3
-    # 최적의 회전 행렬 R = V * U_T
-    # V = V_T.transpose(1, 2)
-    R = torch.bmm(V_T.transpose(1, 2), U.transpose(1, 2)) # Shape: [B, 3, 3]
-
-    # R의 행렬식(determinant)이 -1이 되는 경우 (반전된 경우)를 방지
-    det_R = torch.linalg.det(R) # Shape: [B]
-    
-    # det_R < 0 인 envs에 대해 V_T의 마지막 행의 부호를 뒤집음
-    V_T_new = V_T.clone()
-    V_T_new[:, -1, :] *= torch.sign(det_R).unsqueeze(-1)
-    
-################################3
-
-    # 보정된 최적 회전 행렬
-    R_no_reflect = torch.bmm(V_T_new.transpose(1, 2), U.transpose(1, 2))
-
-    return R_no_reflect, V_T_new  
 
 @torch.jit.script
 def matrix_to_quaternion_wxyz(matrix: torch.Tensor) -> torch.Tensor:
